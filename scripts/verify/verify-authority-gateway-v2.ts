@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+const __dirname = path.dirname(new URL(import.meta.url).pathname);
+
 async function main() {
   const network = process.env.TARGET_NETWORK || "sepolia";
   const address = process.env.CONTRACT_ADDRESS;
@@ -32,81 +34,58 @@ async function main() {
 
   console.log(`Verifying AuthorityMintGateway at ${address} on ${network}...`);
 
+  const repoRoot = path.resolve(__dirname, "../..");
+
   // Read contract source
-  const __dirname = path.dirname(new URL(import.meta.url).pathname);
-  const repoRoot = path.join(__dirname, "..", "..");
   const contractPath = path.join(
     repoRoot,
-    "contracts",
-    "gateways",
-    "AuthorityMintGateway.fhe.faucet.sol",
+    "contracts/gateways/AuthorityMintGateway.fhe.faucet.sol",
   );
   const contractSource = fs.readFileSync(contractPath, "utf8");
 
-  // Read Ownable dependency
-  const ownablePath = path.join(
+  // Helper to read all files in a directory recursively
+  function readAllFiles(
+    dir: string,
+    base: string = "",
+  ): Record<string, { content: string }> {
+    const files: Record<string, { content: string }> = {};
+    const items = fs.readdirSync(dir);
+
+    for (const item of items) {
+      const fullPath = path.join(dir, item);
+      const relativePath = path.join(base, item);
+      const stat = fs.statSync(fullPath);
+
+      if (stat.isDirectory()) {
+        Object.assign(files, readAllFiles(fullPath, relativePath));
+      } else if (item.endsWith(".sol")) {
+        files[relativePath] = { content: fs.readFileSync(fullPath, "utf8") };
+      }
+    }
+
+    return files;
+  }
+
+  // Read all OpenZeppelin contracts
+  const openzeppelinPath = path.join(
     repoRoot,
     "node_modules",
     "@openzeppelin",
     "contracts",
-    "access",
-    "Ownable.sol",
   );
-  const ownableSource = fs.readFileSync(ownablePath, "utf8");
-
-  // Read Context dependency (required by Ownable)
-  const contextPath = path.join(
-    repoRoot,
-    "node_modules",
-    "@openzeppelin",
-    "contracts",
-    "utils",
-    "Context.sol",
+  const openzeppelinSources = readAllFiles(
+    openzeppelinPath,
+    "@openzeppelin/contracts",
   );
-  const contextSource = fs.readFileSync(contextPath, "utf8");
 
-  // Read FHE dependency
+  // Read all FHE contracts
   const fhePath = path.join(
     repoRoot,
     "node_modules",
     "@fhenixprotocol",
     "cofhe-contracts",
-    "FHE.sol",
   );
-  const fheSource = fs.readFileSync(fhePath, "utf8");
-
-  // Read additional dependencies
-  const stringsPath = path.join(
-    repoRoot,
-    "node_modules",
-    "@openzeppelin",
-    "contracts",
-    "utils",
-    "Strings.sol",
-  );
-  const stringsSource = fs.readFileSync(stringsPath, "utf8");
-
-  // Read ICofhe dependency
-  const icofhePath = path.join(
-    repoRoot,
-    "node_modules",
-    "@fhenixprotocol",
-    "cofhe-contracts",
-    "ICofhe.sol",
-  );
-  const icofheSource = fs.readFileSync(icofhePath, "utf8");
-
-  // Read Math dependency
-  const mathPath = path.join(
-    repoRoot,
-    "node_modules",
-    "@openzeppelin",
-    "contracts",
-    "utils",
-    "math",
-    "Math.sol",
-  );
-  const mathSource = fs.readFileSync(mathPath, "utf8");
+  const fheSources = readAllFiles(fhePath, "@fhenixprotocol/cofhe-contracts");
 
   // Prepare standard JSON input for verification
   const sourceCode = JSON.stringify({
@@ -115,12 +94,8 @@ async function main() {
       "contracts/gateways/AuthorityMintGateway.fhe.faucet.sol": {
         content: contractSource,
       },
-      "@openzeppelin/contracts/access/Ownable.sol": { content: ownableSource },
-      "@openzeppelin/contracts/utils/Context.sol": { content: contextSource },
-      "@openzeppelin/contracts/utils/Strings.sol": { content: stringsSource },
-      "@openzeppelin/contracts/utils/math/Math.sol": { content: mathSource },
-      "@fhenixprotocol/cofhe-contracts/ICofhe.sol": { content: icofheSource },
-      "@fhenixprotocol/cofhe-contracts/FHE.sol": { content: fheSource },
+      ...openzeppelinSources,
+      ...fheSources,
     },
     settings: {
       optimizer: { enabled: true, runs: 200 },
@@ -197,19 +172,22 @@ async function main() {
     const statusResult = JSON.parse(statusText);
 
     if (statusResult.status === "1") {
-      console.log(`\n✅ Contract verified successfully!`);
+      console.log("✅ Contract verified successfully!");
       console.log(`View at: ${explorerUrl}/address/${address}#code`);
+    } else if (String(statusResult.result || "").startsWith("Fail -")) {
+      console.log(`❌ Verification failed: ${statusResult.result}`);
+      console.log(`Check details at: ${explorerUrl}/address/${address}#code`);
+      process.exitCode = 1;
     } else {
-      console.log(`\n⏳ Verification pending: ${statusResult.result}`);
+      console.log(`⏳ Verification pending: ${statusResult.result}`);
       console.log(`Check status at: ${explorerUrl}/address/${address}#code`);
     }
   } else {
-    console.error("❌ Verification failed:", result.result);
-    process.exitCode = 1;
+    console.log("❌ Verification failed:", result.result);
   }
 }
 
 main().catch((error) => {
   console.error(error);
-  process.exitCode = 1;
+  process.exit(1);
 });

@@ -8,7 +8,6 @@ import { createCofheConfig, createCofheClient } from "@cofhe/sdk/node";
 import { Encryptable } from "@cofhe/sdk";
 import { chains } from "@cofhe/sdk/chains";
 import { fheNftConfig } from "../config.js";
-import type { InEuint128Input } from "@cofhe/sdk";
 
 type InEuint128Input = {
   ctHash: bigint;
@@ -17,14 +16,22 @@ type InEuint128Input = {
   signature: string;
 };
 
+const PVT_KEY_COFHE =
+  "364a65586e98db188093866aec0f0768d42a02e1a7f90e8ad9a46db3a1767b16"; //0xAlc
+// "7c58a138f6c6453b7c457f232338d51dd6698e7a27dc8f158d8aa272bc8a9b3e"; //0x31
+const PVT_KEY_MINTER =
+  "7c58a138f6c6453b7c457f232338d51dd6698e7a27dc8f158d8aa272bc8a9b3e"; //0x31
+
 async function main() {
   const { network, erc721mg } = fheNftConfig;
   const { mint } = erc721mg;
 
   const rpcUrl = network.rpcUrls[network.target];
-  const pk = network.privateKey;
+  const pkMint = PVT_KEY_MINTER; // for minting transactions
+  const pkCofhe = PVT_KEY_COFHE; // for CoFHE encryption
 
-  const collectionAddress = erc721mg.collectionAddress;
+  const collectionAddress =
+    erc721mg.latestCollectionAddress || erc721mg.collectionAddress;
   const to = mint.to;
   const uri = mint.uri;
   const existingCipherRef = mint.cipherRef || "";
@@ -34,34 +41,46 @@ async function main() {
     throw new Error(
       `RPC URL for target network '${network.target}' is required`,
     );
-  if (!pk)
-    throw new Error("PRIVATE_KEY_ETH or PRIVATE_KEY_ETH_2 env var is required");
+  if (!pkMint)
+    throw new Error(
+      "PRIVATE_KEY_ETH or PRIVATE_KEY_ETH_2 env var is required for minting",
+    );
+  if (!pkCofhe)
+    throw new Error(
+      "BACKEND_PRIVATE_KEY or PRIVATE_KEY_ETH env var is required for CoFHE encryption",
+    );
   if (!collectionAddress)
     throw new Error("fheNftConfig.erc721mg.collectionAddress is required");
   if (!to) throw new Error("fheNftConfig.erc721mg.mint.to is required");
   if (!uri) throw new Error("fheNftConfig.erc721mg.mint.uri is required");
 
+  // Separate signers
   const provider = new ethers.JsonRpcProvider(rpcUrl);
-  const signer = new ethers.Wallet(pk, provider);
+  const signerMint = new ethers.Wallet(pkMint, provider); // wallet for minting
 
-  console.log("Minting ERC721MG giftcode with signer:", signer.address);
+  console.log(
+    "Minting ERC721MG giftcode with minter signer:",
+    signerMint.address,
+  );
   console.log("Collection:", collectionAddress);
   console.log("Recipient:", to);
   if (plaintextGiftcode) {
     console.log("Giftcode (plaintext, off-chain):", plaintextGiftcode);
   }
 
-  // CoFHE client for encrypting the AES key
+  // CoFHE client for encrypting the AES key (using separate key)
   const publicClient = createPublicClient({
     chain: sepolia,
     transport: http(rpcUrl),
   });
 
-  const account = privateKeyToAccount(
-    pk.startsWith("0x") ? (pk as `0x${string}`) : (`0x${pk}` as `0x${string}`),
+  const cofheAccount = privateKeyToAccount(
+    pkCofhe.startsWith("0x")
+      ? (pkCofhe as `0x${string}`)
+      : (`0x${pkCofhe}` as `0x${string}`),
   );
-  const walletClient = createWalletClient({
-    account,
+  const cofheWalletClient = createWalletClient({
+    account: cofheAccount,
     chain: sepolia,
     transport: http(rpcUrl),
   });
@@ -71,7 +90,8 @@ async function main() {
   });
   const cofheClient = createCofheClient(cofheConfig);
 
-  await cofheClient.connect(publicClient, walletClient); // this wallet for cofhe
+  await cofheClient.connect(publicClient, cofheWalletClient); // this wallet for cofhe encryption
+  console.log("CoFHE encryption wallet:", cofheAccount.address);
 
   // Generate random AES key for each mint (16 bytes = 128 bits)
   const aesKeyBytes = crypto.getRandomValues(new Uint8Array(16));
@@ -83,7 +103,7 @@ async function main() {
   console.log("Generated AES key (hex):", "0x" + aesKeyHex);
 
   // ACTUALLY ENCRYPT THE GIFTCODE WITH AES
-  const giftcode = `MOGATE_TEST_GIFTCODE_${Date.now().toString().slice(-6)}`;
+  const giftcode = mint.plaintextGiftcode;
   console.log("Giftcode (plaintext):", giftcode);
 
   // Simple AES encryption using Web Crypto API
@@ -122,6 +142,7 @@ async function main() {
   console.log("Encrypting AES key with CoFHE...");
   const [encKey] = await cofheClient
     .encryptInputs([Encryptable.uint128(aesKeyBigInt)])
+    .setAccount(signerMint.address)
     .execute();
 
   console.log("encKey type:", typeof encKey);
@@ -151,40 +172,36 @@ async function main() {
       "function owner() view returns (address)",
       "function operators(address) view returns (bool)",
       "function minters(address) view returns (bool)",
-      "function mintGiftcode(address to, string uri, (uint256 ctHash,uint8 securityZone,uint8 utype,bytes signature) encKey, string cipherRef) external returns (uint256)",
+      "function mint(address to, string uri, (uint256 ctHash,uint8 securityZone,uint8 utype,bytes signature) encKey, string cipherRef) external returns (uint256)",
     ],
-    signer,
+    signerMint, // use the minter signer for contract calls
   );
 
-  // Ensure signer is a minter. Only owner/operator can grant this role.
-  const isMinter = await collection.minters(signer.address);
+  // Ensure minter signer is a minter. Only owner/operator can grant this role.
+  const isMinter = await collection.minters(signerMint.address);
   if (!isMinter) {
     const [ownerAddress, isOperator] = await Promise.all([
       collection.owner(),
-      collection.operators(signer.address),
+      collection.operators(signerMint.address),
     ]);
     const canGrantRole =
-      ownerAddress.toLowerCase() === signer.address.toLowerCase() || isOperator;
+      ownerAddress.toLowerCase() === signerMint.address.toLowerCase() ||
+      isOperator;
     if (!canGrantRole) {
       throw new Error(
-        `Signer ${signer.address} is not a minter and cannot call setMinter. Ask owner/operator to whitelist this wallet first.`,
+        `Minter signer ${signerMint.address} is not a minter and cannot call setMinter. Ask owner/operator to whitelist this wallet first.`,
       );
     }
-    const txRole = await collection.setMinter(signer.address, true);
+    const txRole = await collection.setMinter(signerMint.address, true);
     console.log("setMinter tx:", txRole.hash);
     await txRole.wait();
   } else {
-    console.log("Signer already has minter role; skipping setMinter.");
+    console.log("Minter signer already has minter role; skipping setMinter.");
   }
 
-  console.log("Calling mintGiftcode...");
-  const tx = await collection.mintGiftcode(
-    to,
-    uri,
-    encKeyForContract,
-    cipherRef,
-  );
-  console.log("mintGiftcode tx:", tx.hash);
+  console.log("Calling mint...");
+  const tx = await collection.mint(to, uri, encKeyForContract, cipherRef);
+  console.log("mint tx:", tx.hash);
   const receipt = await tx.wait();
   console.log("Confirmed in block:", receipt.blockNumber);
 
@@ -221,10 +238,14 @@ async function main() {
       // Read current config
       const configContent = fs.readFileSync(configPath, "utf8");
 
-      // Update the decrypt section with new token info
+      // Read the encrypted file to get ciphertext as hex
+      const encryptedData = fs.readFileSync(cipherRef);
+      const ciphertextHex = Buffer.from(encryptedData).toString("hex");
+
+      // Update the decrypt section with new token info (giftcode comes from mint config)
       const updatedConfig = configContent.replace(
         /decrypt: \{[\s\S]*?tokenId: \d+[\s\S]*?\}/,
-        `decrypt: {\n    tokenId: ${mintedTokenId},\n    cipherRef: "${cipherRef}",\n    giftcode: "${giftcode}", // For testing only\n    aesKeyHex: "0x${aesKeyHex}" // For testing only\n  }`,
+        `decrypt: {\n    tokenId: ${mintedTokenId},\n    cipherRef: "${cipherRef}",\n    aesKeyHex: "0x${aesKeyHex}", // For testing only\n    ciphertextHex: "${ciphertextHex}" // Encrypted giftcode as hex\n  }`,
       );
 
       fs.writeFileSync(configPath, updatedConfig, "utf8");

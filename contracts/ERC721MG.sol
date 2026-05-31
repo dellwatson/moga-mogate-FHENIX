@@ -160,6 +160,18 @@ contract ERC721MG is ERC721URIStorage, ERC721Enumerable, ERC721Burnable, Ownable
         return _unwrapped[tokenId];
     }
 
+    /// @notice Batch check if multiple tokens are unwrapped
+    /// @dev Gas efficient for checking multiple tokens at once
+    function batchIsUnwrapped(uint256[] calldata tokenIds) external view returns (bool[] memory) {
+        bool[] memory results = new bool[](tokenIds.length);
+        for (uint256 i = 0; i < tokenIds.length; i++) {
+            if (_ownerOf(tokenIds[i]) != address(0)) {
+                results[i] = _unwrapped[tokenIds[i]];
+            }
+        }
+        return results;
+    }
+
     // =============================================================
     // Unwrap → Soulbound + FHE unlock (no backend)
     // =============================================================
@@ -183,9 +195,10 @@ contract ERC721MG is ERC721URIStorage, ERC721Enumerable, ERC721Burnable, Ownable
     // Backend-only burn / cleanup
     // =============================================================
 
-    /// @notice Burn a wrapped (soulbound) token and clear encrypted data.
+    /// @notice Burn the unwrapped (soulbound) token and clear encrypted data.
     /// @dev Intended to be called by backend after the off-chain giftcode
     ///      has been used/consumed at the merchant.
+    // intended FOR RE-MINT and FOR CLEANUP. (should only be executed aftre confirming in the offchain)
     function burn(uint256 tokenId) public override onlyOwnerOrOperator {
         require(_unwrapped[tokenId], "NotWrapped");
         _burn(tokenId);

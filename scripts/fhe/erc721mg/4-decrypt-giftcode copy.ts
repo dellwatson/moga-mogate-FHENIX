@@ -114,35 +114,9 @@ async function main() {
     try {
       console.log("Decrypting giftcode from cipherRef:", cipherRef);
 
-      // Download encrypted giftcode from URL or IPFS
-      let encryptedData: Buffer;
-      if (cipherRef.startsWith("http://") || cipherRef.startsWith("https://")) {
-        // Handle regular URLs
-        const response = await fetch(cipherRef);
-        if (!response.ok) {
-          throw new Error(
-            `Failed to download cipherRef: ${response.statusText}`,
-          );
-        }
-        const arrayBuffer = await response.arrayBuffer();
-        encryptedData = Buffer.from(arrayBuffer);
-      } else if (cipherRef.startsWith("ipfs://")) {
-        // Handle IPFS URLs (convert to HTTP gateway)
-        const ipfsHash = cipherRef.replace("ipfs://", "");
-        const ipfsUrl = `https://ipfs.io/ipfs/${ipfsHash}`;
-        const response = await fetch(ipfsUrl);
-        if (!response.ok) {
-          throw new Error(
-            `Failed to download from IPFS: ${response.statusText}`,
-          );
-        }
-        const arrayBuffer = await response.arrayBuffer();
-        encryptedData = Buffer.from(arrayBuffer);
-      } else {
-        // Fallback to local file for backward compatibility
-        const fs = await import("fs/promises");
-        encryptedData = await fs.readFile(cipherRef);
-      }
+      // Read encrypted giftcode file
+      const fs = await import("fs/promises");
+      const encryptedData = await fs.readFile(cipherRef);
 
       // Convert bigint AES key to bytes (16 bytes for AES-128)
       const aesKeyHex = aesKeyBigInt.toString(16).padStart(32, "0");
@@ -153,60 +127,25 @@ async function main() {
       console.log("AES key hex:", aesKeyHex);
       console.log("AES key bytes:", new Uint8Array(aesKeyBytes));
 
-      // Extract IV (always first 12 bytes)
+      // Extract IV and encrypted data
       const iv = encryptedData.slice(0, 12);
+      const ciphertext = encryptedData.slice(12);
 
-      let decryptedGiftcode: Buffer;
+      // Import AES key
+      const cryptoKey = await crypto.subtle.importKey(
+        "raw",
+        aesKeyBytes,
+        { name: "AES-GCM" },
+        false,
+        ["decrypt"],
+      );
 
-      // Try backend format first: iv + authTag(16) + ciphertext
-      if (encryptedData.length >= 28) {
-        try {
-          const authTag = encryptedData.slice(12, 28); // 16 bytes authTag
-          const ciphertext = encryptedData.slice(28);
-
-          // Use Node.js crypto (backend format)
-          const { createDecipheriv } = await import("crypto");
-          const decipher = createDecipheriv(
-            "aes-128-gcm",
-            Buffer.from(aesKeyBytes),
-            iv,
-          );
-          decipher.setAuthTag(authTag);
-
-          let decrypted = decipher.update(ciphertext);
-          decrypted = Buffer.concat([decrypted, decipher.final()]);
-          decryptedGiftcode = decrypted;
-          console.log(
-            "Decrypted using backend format (Node.js crypto with authTag)",
-          );
-        } catch (e) {
-          console.log("Backend format failed, trying working script format...");
-          // Fall through to working script format
-        }
-      }
-
-      // If backend format failed or not enough data, try working script format: iv + ciphertext
-      if (!decryptedGiftcode) {
-        const ciphertext = encryptedData.slice(12);
-
-        // Use Web Crypto API (working script format)
-        const cryptoKey = await crypto.subtle.importKey(
-          "raw",
-          aesKeyBytes,
-          { name: "AES-GCM" },
-          false,
-          ["decrypt"],
-        );
-
-        const decrypted = await crypto.subtle.decrypt(
-          { name: "AES-GCM", iv },
-          cryptoKey,
-          ciphertext,
-        );
-
-        decryptedGiftcode = Buffer.from(decrypted);
-        console.log("Decrypted using working script format (Web Crypto API)");
-      }
+      // Decrypt giftcode
+      const decryptedGiftcode = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv },
+        cryptoKey,
+        ciphertext,
+      );
 
       const decoder = new TextDecoder();
       const giftcode = decoder.decode(decryptedGiftcode);

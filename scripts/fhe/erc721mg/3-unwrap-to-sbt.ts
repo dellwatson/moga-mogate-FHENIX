@@ -7,7 +7,8 @@ async function main() {
   const rpcUrl = network.rpcUrls[network.target];
   const pk = network.privateKey;
 
-  const collectionAddress = erc721mg.collectionAddress;
+  const collectionAddress =
+    erc721mg.latestCollectionAddress || erc721mg.collectionAddress;
   const tokenId = erc721mg.decrypt.tokenId;
 
   if (!rpcUrl)
@@ -28,12 +29,32 @@ async function main() {
 
   const collection = new ethers.Contract(
     collectionAddress,
-    ["function redeemToSoulbound(uint256 tokenId) external"],
+    [
+      "function unwrap(uint256 tokenId) external",
+      "function ownerOf(uint256 tokenId) view returns (address)",
+      "function balanceOf(address owner) view returns (uint256)",
+    ],
     signer,
   );
 
-  const tx = await collection.redeemToSoulbound(tokenId);
-  console.log("redeemToSoulbound tx:", tx.hash);
+  // Check if token exists and who owns it
+  try {
+    const owner = await collection.ownerOf(tokenId);
+    console.log("Token owner:", owner);
+    console.log("Signer address:", signer.address);
+    console.log(
+      "Is signer the owner?",
+      owner.toLowerCase() === signer.address.toLowerCase(),
+    );
+
+    const balance = await collection.balanceOf(signer.address);
+    console.log("Signer balance:", balance.toString());
+  } catch (err) {
+    console.error("Error checking token:", err.message);
+  }
+
+  const tx = await collection.unwrap(tokenId);
+  console.log("unwrap tx:", tx.hash);
   const receipt = await tx.wait();
   console.log("Confirmed in block:", receipt.blockNumber);
 }
